@@ -132,10 +132,14 @@ def learn(env,
     target_q_func_value = q_func(obs_tp1_float, num_actions, "target_q_func", reuse=False)
     target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="target_q_func")
 
-    estimate = tf.gather(q_func_value, act_t_ph)
+    def select(t, ind):
+        return tf.reduce_sum(t * tf.one_hot(ind, num_actions), axis=1)
+        # return tf.gather_nd(t, tf.stack(tf.range(tf.shape(ind)[0], ind)))
+
+    estimate = select(q_func_value, act_t_ph)
     # Use Double-DQN target
-    backup_estimate = rew_t_ph + gamma * tf.gather(target_q_func_value, tf.argmax(q_func_next_value))
-    total_error = tf.squared_difference(estimate, backup_estimate)
+    backup_estimate = rew_t_ph + gamma * select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
+    total_error = tf.reduce_sum(tf.squared_difference(estimate, backup_estimate))
 
     # construct optimization op (with gradient clipping)
     learning_rate = tf.placeholder(tf.float32, (), name="learning_rate")
@@ -233,7 +237,6 @@ def learn(env,
         if (t > learning_starts and
                 t % learning_freq == 0 and
                 replay_buffer.can_sample(batch_size)):
-            pass
             # Here, you should perform training. Training consists of four steps:
             # 3.a: use the replay buffer to sample a batch of transitions (see the
             # replay buffer code for function definition, each batch that you sample
