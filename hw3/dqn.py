@@ -125,11 +125,17 @@ def learn(env,
     # And then you can obtain the variables like this:
     # q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
     # Older versions of TensorFlow may require using "VARIABLES" instead of "GLOBAL_VARIABLES"
-    ######
-    
-    # YOUR CODE HERE
+    q_func_value = q_func(obs_t_float, num_actions, "q_func", reuse=False)
+    q_func_next_value = q_func(obs_tp1_float, num_actions, "q_func", reuse=True)
+    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="q_func")
 
-    ######
+    target_q_func_value = q_func(obs_tp1_float, num_actions, "target_q_func", reuse=False)
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="target_q_func")
+
+    estimate = tf.gather(q_func_value, act_t_ph)
+    # Use Double-DQN target
+    backup_estimate = rew_t_ph + gamma * tf.gather(target_q_func_value, tf.argmax(q_func_next_value))
+    total_error = tf.squared_difference(estimate, backup_estimate)
 
     # construct optimization op (with gradient clipping)
     learning_rate = tf.placeholder(tf.float32, (), name="learning_rate")
@@ -154,8 +160,12 @@ def learn(env,
     num_param_updates = 0
     mean_episode_reward      = -float('nan')
     best_mean_episode_reward = -float('inf')
-    last_obs = env.reset()
+    last_frame = env.reset()
     LOG_EVERY_N_STEPS = 10000
+
+    init_op = tf.global_variables_initializer()
+    session.run(init_op)
+    model_initialized = True
 
     for t in itertools.count():
         ### 1. Check stopping criterion
@@ -163,14 +173,14 @@ def learn(env,
             break
 
         ### 2. Step the env and store the transition
-        # At this point, "last_obs" contains the latest observation that was
+        # At this point, "last_frame" contains the latest observation that was
         # recorded from the simulator. Here, your code needs to store this
         # observation and its outcome (reward, next observation, etc.) into
         # the replay buffer while stepping the simulator forward one step.
         # At the end of this block of code, the simulator should have been
         # advanced one step, and the replay buffer should contain one more
         # transition.
-        # Specifically, last_obs must point to the new latest observation.
+        # Specifically, last_frame must point to the new latest observation.
         # Useful functions you'll need to call:
         # obs, reward, done, info = env.step(action)
         # this steps the environment forward one step
@@ -178,7 +188,7 @@ def learn(env,
         # this resets the environment if you reached an episode boundary.
         # Don't forget to call env.reset() to get a new observation if done
         # is true!!
-        # Note that you cannot use "last_obs" directly as input
+        # Note that you cannot use "last_frame" directly as input
         # into your network, since it needs to be processed to include context
         # from previous frames. You should check out the replay buffer
         # implementation in dqn_utils.py to see what functionality the replay
@@ -192,14 +202,28 @@ def learn(env,
         # may not yet have been initialized (but of course, the first step
         # might as well be random, since you haven't trained your net...)
 
-        #####
-        
-        # YOUR CODE HERE
+        last_frame_idx = replay_buffer.store_frame(last_frame)
 
-        #####
+        if exploration.value(t) > np.random.rand():
+            action = np.random.randint(0, num_actions)
+        else:
+            cur_obs = replay_buffer.encode_recent_observation()
+            action = tf.argmax(q_func_value, axis=1).eval(
+                    feed_dict={
+                        obs_t_ph: [cur_obs],
+                    },
+                    session=session)[0]
+
+        next_frame, reward, done, info = env.step(action)
+        replay_buffer.store_effect(last_frame_idx, action, reward, done)
+
+        if done:
+            last_frame = env.reset()
+        else:
+            last_frame = next_frame
 
         # at this point, the environment should have been advanced one step (and
-        # reset if done was true), and last_obs should point to the new latest
+        # reset if done was true), and last_frame should point to the new latest
         # observation
 
         ### 3. Perform experience replay and train the network.
@@ -209,6 +233,7 @@ def learn(env,
         if (t > learning_starts and
                 t % learning_freq == 0 and
                 replay_buffer.can_sample(batch_size)):
+            pass
             # Here, you should perform training. Training consists of four steps:
             # 3.a: use the replay buffer to sample a batch of transitions (see the
             # replay buffer code for function definition, each batch that you sample
@@ -242,11 +267,20 @@ def learn(env,
             # session.run(update_target_fn)
             # you should update every target_update_freq steps, and you may find the
             # variable num_param_updates useful for this (it was initialized to 0)
-            #####
-            
-            # YOUR CODE HERE
+            obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
 
-            #####
+            _, total_error_val = session.run([train_fn, total_error], feed_dict={
+                obs_t_ph: obs_batch,
+                act_t_ph: act_batch,
+                rew_t_ph: rew_batch,
+                obs_tp1_ph: next_obs_batch,
+                done_mask_ph: done_mask,
+                learning_rate: optimizer_spec.lr_schedule.value(t)
+            })
+            num_param_updates += 1
+
+            if num_param_updates % target_update_freq == 0:
+                session.run(update_target_fn)
 
         ### 4. Log progress
         episode_rewards = get_wrapper_by_name(env, "Monitor").get_episode_rewards()
