@@ -1,3 +1,4 @@
+import time
 import sys
 import gym.spaces
 import itertools
@@ -74,30 +75,40 @@ def learn(env,
     grad_norm_clipping: float or None
         If not None gradients' norms are clipped to this value.
     """
-    assert type(env.observation_space) == gym.spaces.Box
+    assert type(env.observation_space) == gym.spaces.Box or \
+            type(env.observation_space) == gym.spaces.Discrete
     assert type(env.action_space)      == gym.spaces.Discrete
 
     ###############
     # BUILD MODEL #
     ###############
 
-    if len(env.observation_space.shape) == 1:
-        # This means we are running on low-dimensional observations (e.g. RAM)
-        input_shape = env.observation_space.shape
-    else:
-        img_h, img_w, img_c = env.observation_space.shape
-        input_shape = (img_h, img_w, frame_history_len * img_c)
+    if type(env.observation_space) == gym.spaces.Box:
+        if len(env.observation_space.shape) == 1:
+            # This means we are running on low-dimensional observations (e.g. RAM)
+            input_shape = env.observation_space.shape
+        else:
+            img_h, img_w, img_c = env.observation_space.shape
+            input_shape = (img_h, img_w, frame_history_len * img_c)
+    elif type(env.observation_space) == gym.spaces.Discrete:
+        input_shape = env.observation_space.n
     num_actions = env.action_space.n
+
+    def observation_placeholder():
+        if type(env.observation_space) == gym.spaces.Box:
+            return tf.placeholder(tf.uint8, [None] + list(input_shape))
+        else:
+            return tf.placeholder(tf.uint8, [None] + [1])
 
     # set up placeholders
     # placeholder for current observation (or state)
-    obs_t_ph              = tf.placeholder(tf.uint8, [None] + list(input_shape))
+    obs_t_ph              = observation_placeholder()
     # placeholder for current action
     act_t_ph              = tf.placeholder(tf.int32,   [None])
     # placeholder for current reward
     rew_t_ph              = tf.placeholder(tf.float32, [None])
     # placeholder for next observation (or state)
-    obs_tp1_ph            = tf.placeholder(tf.uint8, [None] + list(input_shape))
+    obs_tp1_ph            = observation_placeholder()
     # placeholder for end of episode mask
     # this value is 1 if the next state corresponds to the end of an episode,
     # in which case there is no Q-value at the next state; at the end of an
@@ -106,8 +117,12 @@ def learn(env,
     done_mask_ph          = tf.placeholder(tf.float32, [None])
 
     # casting to float on GPU ensures lower data transfer times.
-    obs_t_float   = tf.cast(obs_t_ph,   tf.float32) / 255.0
-    obs_tp1_float = tf.cast(obs_tp1_ph, tf.float32) / 255.0
+    if type(env.observation_space) == gym.spaces.Box:
+        obs_t_float   = tf.cast(obs_t_ph,   tf.float32) / 255.0
+        obs_tp1_float = tf.cast(obs_tp1_ph, tf.float32) / 255.0
+    else:
+        obs_t_float   = obs_t_ph
+        obs_tp1_float = obs_tp1_ph
 
     # Here, you should fill in your own code to compute the Bellman error. This requires
     # evaluating the current and next Q-values and constructing the corresponding error.
@@ -137,15 +152,20 @@ def learn(env,
         # return tf.gather_nd(t, tf.stack(tf.range(tf.shape(ind)[0], ind)))
 
     estimate = select(q_func_value, act_t_ph)
+
     # Use Double-DQN target
-    backup_estimate = rew_t_ph + gamma * select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
-    total_error = tf.reduce_sum(tf.squared_difference(estimate, backup_estimate))
+    next_reward = gamma * tf.reduce_max(target_q_func_value, axis=1)
+    # select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
+    backup_estimate = rew_t_ph + (1 - done_mask_ph) * next_reward
+    total_error = tf.reduce_sum(huber_loss(estimate - backup_estimate))
 
     # construct optimization op (with gradient clipping)
     learning_rate = tf.placeholder(tf.float32, (), name="learning_rate")
     optimizer = optimizer_spec.constructor(learning_rate=learning_rate, **optimizer_spec.kwargs)
     train_fn = minimize_and_clip(optimizer, total_error,
                  var_list=q_func_vars, clip_val=grad_norm_clipping)
+
+    action_fn = tf.argmax(q_func_value, axis=1)[0]
 
     # update_target_fn will be called periodically to copy Q network to target Q network
     update_target_fn = []
@@ -165,11 +185,36 @@ def learn(env,
     mean_episode_reward      = -float('nan')
     best_mean_episode_reward = -float('inf')
     last_frame = env.reset()
-    LOG_EVERY_N_STEPS = 10000
+    LOG_EVERY_N_STEPS = 100
 
-    init_op = tf.global_variables_initializer()
-    session.run(init_op)
-    model_initialized = True
+    # init_op = tf.global_variables_initializer()
+    # session.run(init_op)
+    # model_initialized = True
+
+    class Timer(object):
+        def __init__(self):
+            self.start_times = {}
+            self.total_times = {}
+            self.total_counts = {}
+
+        def start(self, name):
+            self.start_times[name] = time.time()
+
+        def finish(self, name):
+            delta = time.time() - self.start_times[name]
+            if not name in self.total_times:
+                self.total_times[name] = 0
+                self.total_counts[name] = 0
+
+            self.total_times[name] += delta
+            self.total_counts[name] += 1
+
+        def mean_time(self, name):
+            if not name in self.total_times:
+                return 0
+            return self.total_times[name] / self.total_counts[name]
+
+    timer = Timer()
 
     for t in itertools.count():
         ### 1. Check stopping criterion
@@ -206,17 +251,18 @@ def learn(env,
         # may not yet have been initialized (but of course, the first step
         # might as well be random, since you haven't trained your net...)
 
+        timer.start("play")
+
         last_frame_idx = replay_buffer.store_frame(last_frame)
 
-        if exploration.value(t) > np.random.rand():
+        timer.start("act")
+        if exploration.value(t) > np.random.rand() or not model_initialized:
             action = np.random.randint(0, num_actions)
         else:
             cur_obs = replay_buffer.encode_recent_observation()
-            action = tf.argmax(q_func_value, axis=1).eval(
-                    feed_dict={
-                        obs_t_ph: [cur_obs],
-                    },
-                    session=session)[0]
+            action = session.run(action_fn,
+                    feed_dict={ obs_t_ph: [cur_obs], })
+        timer.finish("act")
 
         next_frame, reward, done, info = env.step(action)
         replay_buffer.store_effect(last_frame_idx, action, reward, done)
@@ -225,6 +271,8 @@ def learn(env,
             last_frame = env.reset()
         else:
             last_frame = next_frame
+
+        timer.finish("play")
 
         # at this point, the environment should have been advanced one step (and
         # reset if done was true), and last_frame should point to the new latest
@@ -270,8 +318,18 @@ def learn(env,
             # session.run(update_target_fn)
             # you should update every target_update_freq steps, and you may find the
             # variable num_param_updates useful for this (it was initialized to 0)
+            timer.start("sample")
             obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
+            timer.finish("sample")
 
+            if not model_initialized:
+                initialize_interdependent_variables(session, tf.global_variables(), {
+                    obs_t_ph: obs_batch,
+                    obs_tp1_ph: next_obs_batch,
+                    })
+                model_initialized = True
+
+            timer.start("train")
             _, total_error_val = session.run([train_fn, total_error], feed_dict={
                 obs_t_ph: obs_batch,
                 act_t_ph: act_batch,
@@ -280,6 +338,8 @@ def learn(env,
                 done_mask_ph: done_mask,
                 learning_rate: optimizer_spec.lr_schedule.value(t)
             })
+            # print(total_error_val)
+            timer.finish("train")
             num_param_updates += 1
 
             if num_param_updates % target_update_freq == 0:
@@ -292,10 +352,15 @@ def learn(env,
         if len(episode_rewards) > 100:
             best_mean_episode_reward = max(best_mean_episode_reward, mean_episode_reward)
         if t % LOG_EVERY_N_STEPS == 0 and model_initialized:
+            print("--------")
             print("Timestep %d" % (t,))
             print("mean reward (100 episodes) %f" % mean_episode_reward)
             print("best mean reward %f" % best_mean_episode_reward)
             print("episodes %d" % len(episode_rewards))
             print("exploration %f" % exploration.value(t))
             print("learning_rate %f" % optimizer_spec.lr_schedule.value(t))
+            # print("mean sample time %f" % timer.mean_time("sample"))
+            # print("mean train time %f" % timer.mean_time("train"))
+            # print("mean play time %f" % timer.mean_time("play"))
+            # print("mean act time %f" % timer.mean_time("act"))
             sys.stdout.flush()
