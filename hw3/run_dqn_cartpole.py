@@ -18,19 +18,17 @@ def cartpole_model(img_in, num_actions, scope, reuse=False):
         out = img_in
         out = layers.flatten(out)
         with tf.variable_scope("action_value"):
-            out = layers.fully_connected(out, num_outputs=128,         activation_fn=tf.nn.relu)
+            out = layers.fully_connected(out, num_outputs=64,         activation_fn=tf.nn.relu)
             out = layers.fully_connected(out, num_outputs=num_actions, activation_fn=None)
 
         return out
 
-def atari_learn(env,
-                session,
-                num_timesteps):
+def cartpole_learn(env, session, num_timesteps):
     # This is just a rough estimate
     num_iterations = float(num_timesteps) / 4.0
 
     # lr_multiplier = 1.0
-    lr_multiplier = 0.1
+    lr_multiplier = 0.01
     lr_schedule = PiecewiseSchedule([
                                          (0,                   1e-4 * lr_multiplier),
                                          (num_iterations / 10, 1e-4 * lr_multiplier),
@@ -40,6 +38,8 @@ def atari_learn(env,
     optimizer = dqn.OptimizerSpec(
         constructor=tf.train.AdamOptimizer,
         kwargs=dict(epsilon=1e-4),
+        # constructor=tf.train.RMSPropOptimizer,
+        # kwargs=dict(epsilon=1e-1),
         lr_schedule=lr_schedule
     )
 
@@ -51,8 +51,9 @@ def atari_learn(env,
     exploration_schedule = PiecewiseSchedule(
         [
             (0, 1.0),
-            (num_iterations / 4, 0.1),
-            (num_iterations / 2, 0.01),
+            (0.2 * num_timesteps, 0.9),
+            (0.5 * num_timesteps, 0.5),
+            (0.9 * num_timesteps, 0.1),
         ], outside_value=0.01
     )
 
@@ -63,13 +64,13 @@ def atari_learn(env,
         session=session,
         exploration=exploration_schedule,
         stopping_criterion=stopping_criterion,
-        replay_buffer_size=10000,
-        batch_size=32,
+        replay_buffer_size=50000,
+        batch_size=500,
         gamma=0.99,
-        learning_starts=500,
+        learning_starts=2000,
         learning_freq=4,
-        frame_history_len=4,
-        target_update_freq=100,
+        frame_history_len=2,
+        target_update_freq=1000,
         grad_norm_clipping=10
     )
     env.close()
@@ -121,7 +122,7 @@ def main():
     set_global_seeds(seed)
     env = wrappers.Monitor(env, '/tmp/cartpole-experiment-1', force=True)
     session = get_session()
-    atari_learn(env, session, num_timesteps=max_timesteps)
+    cartpole_learn(env, session, num_timesteps=max_timesteps)
 
 if __name__ == "__main__":
     main()

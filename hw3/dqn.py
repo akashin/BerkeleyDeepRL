@@ -1,4 +1,6 @@
 import time
+import os
+import datetime
 import sys
 import gym.spaces
 import itertools
@@ -6,10 +8,16 @@ import numpy as np
 import random
 import tensorflow                as tf
 import tensorflow.contrib.layers as layers
+from tensorflow.core.framework import summary_pb2
 from collections import namedtuple
 from dqn_utils import *
 
 OptimizerSpec = namedtuple("OptimizerSpec", ["constructor", "kwargs", "lr_schedule"])
+
+def log_scalar(writer, step, tag, val):
+    writer.add_summary(
+        summary_pb2.Summary(value=[summary_pb2.Summary.Value(tag=tag, simple_value=float(np.float32(val)))]),
+        step)
 
 def learn(env,
           q_func,
@@ -141,7 +149,9 @@ def learn(env,
     # q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
     # Older versions of TensorFlow may require using "VARIABLES" instead of "GLOBAL_VARIABLES"
     q_func_value = q_func(obs_t_float, num_actions, "q_func", reuse=False)
-    q_func_next_value = q_func(obs_tp1_float, num_actions, "q_func", reuse=True)
+    tf.summary.histogram("q_value", q_func_value)
+
+    # q_func_next_value = q_func(obs_tp1_float, num_actions, "q_func", reuse=True)
     q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="q_func")
 
     target_q_func_value = q_func(obs_tp1_float, num_actions, "target_q_func", reuse=False)
@@ -154,10 +164,12 @@ def learn(env,
     estimate = select(q_func_value, act_t_ph)
 
     # Use Double-DQN target
-    next_reward = gamma * tf.reduce_max(target_q_func_value, axis=1)
-    # select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
-    backup_estimate = rew_t_ph + (1 - done_mask_ph) * next_reward
+    next_reward = tf.reduce_max(target_q_func_value, axis=1)
+    # next_reward = tf.reduce_max(q_func_next_value, axis=1)
+    # next_reward = select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
+    backup_estimate = rew_t_ph + (1 - done_mask_ph) * gamma * next_reward
     total_error = tf.reduce_sum(huber_loss(estimate - backup_estimate))
+    tf.summary.scalar('bellman_error', total_error)
 
     # construct optimization op (with gradient clipping)
     learning_rate = tf.placeholder(tf.float32, (), name="learning_rate")
@@ -187,10 +199,6 @@ def learn(env,
     last_frame = env.reset()
     LOG_EVERY_N_STEPS = 100
 
-    # init_op = tf.global_variables_initializer()
-    # session.run(init_op)
-    # model_initialized = True
-
     class Timer(object):
         def __init__(self):
             self.start_times = {}
@@ -215,6 +223,17 @@ def learn(env,
             return self.total_times[name] / self.total_counts[name]
 
     timer = Timer()
+
+    merged = tf.summary.merge_all()
+    date = datetime.datetime.now().isoformat()
+    writer = tf.summary.FileWriter(os.path.join('/tmp/dqn/cartpole_train', date))
+
+    init_op = tf.global_variables_initializer()
+    session.run(init_op)
+    model_initialized = True
+    session.run(update_target_fn)
+
+    action_count = np.zeros(2)
 
     for t in itertools.count():
         ### 1. Check stopping criterion
@@ -260,15 +279,26 @@ def learn(env,
             action = np.random.randint(0, num_actions)
         else:
             cur_obs = replay_buffer.encode_recent_observation()
-            action = session.run(action_fn,
+            q_values = session.run(q_func_value,
                     feed_dict={ obs_t_ph: [cur_obs], })
+
+            q_delta = (q_values[0, 0] - q_values[0, 1])
+            log_scalar(writer, t, "q_delta", q_delta)
+            # print(q_values)
+            action = np.argmax(q_values)
+            # action = session.run(action_fn,
+                    # feed_dict={ obs_t_ph: [cur_obs], })
         timer.finish("act")
+        action_count[action] += 1
 
         next_frame, reward, done, info = env.step(action)
         replay_buffer.store_effect(last_frame_idx, action, reward, done)
 
         if done:
             last_frame = env.reset()
+            left_percentage = action_count[0] / (action_count[0] + action_count[1])
+            log_scalar(writer, t, "left_percentage", left_percentage)
+            action_count = np.zeros(2)
         else:
             last_frame = next_frame
 
@@ -322,15 +352,15 @@ def learn(env,
             obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
             timer.finish("sample")
 
-            if not model_initialized:
-                initialize_interdependent_variables(session, tf.global_variables(), {
-                    obs_t_ph: obs_batch,
-                    obs_tp1_ph: next_obs_batch,
-                    })
-                model_initialized = True
+            # if not model_initialized:
+                # initialize_interdependent_variables(session, tf.global_variables(), {
+                    # obs_t_ph: obs_batch,
+                    # obs_tp1_ph: next_obs_batch,
+                    # })
+                # model_initialized = True
 
             timer.start("train")
-            _, total_error_val = session.run([train_fn, total_error], feed_dict={
+            summary, _, total_error_val = session.run([merged, train_fn, total_error], feed_dict={
                 obs_t_ph: obs_batch,
                 act_t_ph: act_batch,
                 rew_t_ph: rew_batch,
@@ -338,6 +368,7 @@ def learn(env,
                 done_mask_ph: done_mask,
                 learning_rate: optimizer_spec.lr_schedule.value(t)
             })
+            writer.add_summary(summary, t)
             # print(total_error_val)
             timer.finish("train")
             num_param_updates += 1
@@ -349,6 +380,7 @@ def learn(env,
         episode_rewards = get_wrapper_by_name(env, "Monitor").get_episode_rewards()
         if len(episode_rewards) > 0:
             mean_episode_reward = np.mean(episode_rewards[-100:])
+            log_scalar(writer, t, "mean_episode_reward", mean_episode_reward)
         if len(episode_rewards) > 100:
             best_mean_episode_reward = max(best_mean_episode_reward, mean_episode_reward)
         if t % LOG_EVERY_N_STEPS == 0 and model_initialized:
