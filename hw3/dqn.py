@@ -151,7 +151,7 @@ def learn(env,
     q_func_value = q_func(obs_t_float, num_actions, "q_func", reuse=False)
     tf.summary.histogram("q_value", q_func_value)
 
-    # q_func_next_value = q_func(obs_tp1_float, num_actions, "q_func", reuse=True)
+    q_func_next_value = q_func(obs_tp1_float, num_actions, "q_func", reuse=True)
     q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope="q_func")
 
     target_q_func_value = q_func(obs_tp1_float, num_actions, "target_q_func", reuse=False)
@@ -164,12 +164,23 @@ def learn(env,
     estimate = select(q_func_value, act_t_ph)
 
     # Use Double-DQN target
-    next_reward = tf.reduce_max(target_q_func_value, axis=1)
+    # next_reward = tf.reduce_max(target_q_func_value, axis=1)
     # next_reward = tf.reduce_max(q_func_next_value, axis=1)
-    # next_reward = select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
+    next_reward = select(target_q_func_value, tf.argmax(q_func_next_value, axis=1))
     backup_estimate = rew_t_ph + (1 - done_mask_ph) * gamma * next_reward
-    total_error = tf.reduce_sum(huber_loss(estimate - backup_estimate))
+    total_error = tf.reduce_mean(tf.squared_difference(estimate, backup_estimate))
     tf.summary.scalar('bellman_error', total_error)
+
+    overestimate = estimate - backup_estimate
+    overestimate_mean = tf.reduce_mean(overestimate)
+    overestimate_max = tf.reduce_max(overestimate)
+    tf.summary.scalar('overestimate_mean', overestimate_mean)
+    tf.summary.scalar('overestimate_max', overestimate_max)
+    tf.summary.histogram('overestimate', overestimate)
+
+    estimate_mean = tf.reduce_mean(estimate)
+    tf.summary.scalar('estimate_mean', estimate_mean)
+    tf.summary.histogram('estimate', estimate)
 
     # construct optimization op (with gradient clipping)
     learning_rate = tf.placeholder(tf.float32, (), name="learning_rate")
@@ -274,6 +285,7 @@ def learn(env,
 
         last_frame_idx = replay_buffer.store_frame(last_frame)
 
+        terminal_q_values = None
         timer.start("act")
         if exploration.value(t) > np.random.rand() or not model_initialized:
             action = np.random.randint(0, num_actions)
@@ -282,9 +294,11 @@ def learn(env,
             q_values = session.run(q_func_value,
                     feed_dict={ obs_t_ph: [cur_obs], })
 
-            q_delta = (q_values[0, 0] - q_values[0, 1])
-            log_scalar(writer, t, "q_delta", q_delta)
-            # print(q_values)
+            terminal_q_values = q_values[0]
+            # q_delta = (q_values[0, 0] - q_values[0, 1])
+            # log_scalar(writer, t, "q_delta", q_delta)
+            # log_scalar(writer, t, "q_left", q_values[0, 0])
+            # log_scalar(writer, t, "q_right", q_values[0, 1])
             action = np.argmax(q_values)
             # action = session.run(action_fn,
                     # feed_dict={ obs_t_ph: [cur_obs], })
@@ -295,6 +309,10 @@ def learn(env,
         replay_buffer.store_effect(last_frame_idx, action, reward, done)
 
         if done:
+            if terminal_q_values is not None:
+                log_scalar(writer, t, "q_left_terminal", terminal_q_values[0])
+                log_scalar(writer, t, "q_right_terminal", terminal_q_values[1])
+
             last_frame = env.reset()
             left_percentage = action_count[0] / (action_count[0] + action_count[1])
             log_scalar(writer, t, "left_percentage", left_percentage)
@@ -351,6 +369,8 @@ def learn(env,
             timer.start("sample")
             obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
             timer.finish("sample")
+
+            log_scalar(writer, t, "terminal_proportion", np.mean(done_mask))
 
             # if not model_initialized:
                 # initialize_interdependent_variables(session, tf.global_variables(), {

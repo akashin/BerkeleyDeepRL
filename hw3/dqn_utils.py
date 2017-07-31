@@ -106,6 +106,23 @@ class LinearSchedule(object):
         fraction  = min(float(t) / self.schedule_timesteps, 1.0)
         return self.initial_p + fraction * (self.final_p - self.initial_p)
 
+class InverseSchedule(object):
+    def __init__(self, initial_p, gamma):
+        """Schedule of form initial_p / t^gamma
+        Parameters
+        ----------
+        initial_p: float
+            initial output value
+        gamma: float
+            power coefficient
+        """
+        self.initial_p = initial_p
+        self.gamma     = gamma
+
+    def value(self, t):
+        """See Schedule.value"""
+        return self.initial_p / (t + 1)**self.gamma
+
 def compute_exponential_averages(variables, decay):
     """Given a list of tensorflow scalar variables
     create ops corresponding to their exponential
