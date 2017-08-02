@@ -8,6 +8,7 @@ import numpy as np
 import random
 import tensorflow                as tf
 import tensorflow.contrib.layers as layers
+from tensorflow.contrib.framework.python.ops import variables
 from tensorflow.core.framework import summary_pb2
 from collections import namedtuple
 from dqn_utils import *
@@ -181,6 +182,7 @@ def learn(env,
     estimate_mean = tf.reduce_mean(estimate)
     tf.summary.scalar('estimate_mean', estimate_mean)
     tf.summary.histogram('estimate', estimate)
+    tf.summary.histogram('backup_estimate', backup_estimate)
 
     # construct optimization op (with gradient clipping)
     learning_rate = tf.placeholder(tf.float32, (), name="learning_rate")
@@ -234,6 +236,15 @@ def learn(env,
             return self.total_times[name] / self.total_counts[name]
 
     timer = Timer()
+
+    def add_fc_weights_summary(name, path):
+        biases = variables.get_variables(path + '/biases')
+        weights = variables.get_variables(path + '/weights')
+        biases = tf.expand_dims(biases, 1)
+        tf.summary.image(name, [tf.transpose(tf.concat([weights, biases], 1))])
+
+    add_fc_weights_summary('target_head_weights', 'target_q_func/action_value/fc_head')
+    add_fc_weights_summary('target_input_weights', 'target_q_func/action_value/fc_input')
 
     merged = tf.summary.merge_all()
     date = datetime.datetime.now().isoformat()

@@ -15,12 +15,14 @@ from atari_wrappers import *
 def cartpole_model(img_in, num_actions, scope, reuse=False):
     # as described in https://storage.googleapis.com/deepmind-data/assets/papers/DeepMindNature14236Paper.pdf
     with tf.variable_scope(scope, reuse=reuse):
+        # out = tf.ones(tf.shape(img_in))
         out = img_in
         out = layers.flatten(out)
         with tf.variable_scope("action_value"):
-            out = layers.fully_connected(out, num_outputs=64,         activation_fn=tf.nn.relu)
-            out = layers.fully_connected(out, num_outputs=64,         activation_fn=tf.nn.relu)
-            out = layers.fully_connected(out, num_outputs=num_actions, activation_fn=None)
+            out = layers.fully_connected(out, num_outputs=16,
+                    activation_fn=tf.nn.relu, scope='fc_input')
+            out = layers.fully_connected(out, num_outputs=num_actions,
+                    activation_fn=None, scope='fc_head')
 
         return out
 
@@ -28,8 +30,8 @@ def cartpole_learn(env, session, num_timesteps):
     # This is just a rough estimate
     num_iterations = float(num_timesteps) / 4.0
 
-    lr_multiplier = 1.0
-    # lr_multiplier = 0.01
+    # lr_multiplier = 1.0
+    # lr_multiplier = 0.1
     # lr_schedule = PiecewiseSchedule([
                                          # (0,                   1e-4 * lr_multiplier),
                                          # (num_iterations / 2,  1e-5 * lr_multiplier),
@@ -38,8 +40,10 @@ def cartpole_learn(env, session, num_timesteps):
     lr_schedule = InverseSchedule(initial_p=0.1, gamma=0.6)
 
     optimizer = dqn.OptimizerSpec(
-        constructor=tf.train.AdamOptimizer,
-        kwargs=dict(epsilon=1e-4),
+        constructor=tf.train.GradientDescentOptimizer,
+        # constructor=tf.train.AdamOptimizer,
+        # kwargs=dict(epsilon=1e-4),
+        kwargs=dict(),
         # constructor=tf.train.RMSPropOptimizer,
         # kwargs=dict(epsilon=1e-1),
         lr_schedule=lr_schedule
@@ -53,9 +57,9 @@ def cartpole_learn(env, session, num_timesteps):
     exploration_schedule = PiecewiseSchedule(
         [
             (0, 1.0),
-            (0.2 * num_timesteps, 0.9),
-            (0.5 * num_timesteps, 0.5),
-            (0.9 * num_timesteps, 0.1),
+            # (0.2 * num_timesteps, 0.9),
+            # (0.5 * num_timesteps, 0.5),
+            (0.1 * num_timesteps, 0.1),
         ], outside_value=0.01
     )
 
@@ -66,13 +70,13 @@ def cartpole_learn(env, session, num_timesteps):
         session=session,
         exploration=exploration_schedule,
         stopping_criterion=stopping_criterion,
-        replay_buffer_size=50000,
-        batch_size=500,
+        replay_buffer_size=100000,
+        batch_size=256,
         gamma=0.99,
         learning_starts=2000,
-        learning_freq=4,
-        frame_history_len=1,
-        target_update_freq=10,
+        learning_freq=1,
+        frame_history_len=4,
+        target_update_freq=1000,
         grad_norm_clipping=1000,
     )
     env.close()
